@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>محلل الأسانيد — أداة بحثية</title>
+<style>
+  :root { --accent:#1f5c4d; --bg:#f7f6f2; --card:#fff; --ink:#232323; --muted:#777; --warn:#a05a00; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI", Tahoma, "Noto Naskh Arabic", serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--accent); color:#fff; padding:18px 22px; }
+  header h1 { margin:0; font-size:22px; } header p { margin:4px 0 0; font-size:13px; opacity:.85; }
+  main { max-width:980px; margin:0 auto; padding:18px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; background:var(--card); padding:14px; border-radius:10px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  select,input,button { font-size:15px; padding:9px 12px; border:1px solid #ccc; border-radius:8px; font-family:inherit; }
+  input#q { flex:1; min-width:220px; }
+  button.primary { background:var(--accent); color:#fff; border:none; cursor:pointer; }
+  button.primary:disabled { opacity:.5; }
+  #status { font-size:13px; color:var(--muted); margin:8px 2px; }
+  .hit { background:var(--card); border-radius:10px; padding:12px 14px; margin:8px 0; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  .hit:hover { outline:2px solid var(--accent); }
+  .hit .meta { font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .card { background:var(--card); border-radius:10px; padding:16px; margin:10px 0; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  .isnadtext { background:#eef3f1; border-radius:8px; padding:10px 12px; line-height:1.9; }
+  .rawi { border-right:4px solid var(--accent); }
+  .rawi.warn { border-right-color:var(--warn); }
+  .rawi h3 { margin:0 0 6px; font-size:17px; }
+  .badge { display:inline-block; font-size:12px; border-radius:20px; padding:2px 10px; margin-left:6px; background:#e4ede9; color:var(--accent); }
+  .badge.warn { background:#f7e9d8; color:var(--warn); }
+  .badge.grey { background:#eee; color:#555; }
+  .kv { font-size:14px; margin:2px 0; }
+  .kv b { color:var(--accent); }
+  details { margin-top:8px; }
+  summary { cursor:pointer; color:var(--accent); font-size:14px; }
+  .quote { font-size:13.5px; background:#fafaf7; border-radius:6px; padding:7px 10px; margin:5px 0; line-height:1.8; border-right:3px solid #ddd; }
+  .quote .src { color:var(--muted); font-size:12px; }
+  .flags li { margin:5px 0; font-size:14px; }
+  footer { text-align:center; font-size:12.5px; color:var(--muted); padding:24px 10px; line-height:1.8; }
+  .cand { font-size:14px; margin:3px 0; padding-right:10px; }
+  #back { display:none; margin-bottom:10px; }
+  .spin { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>محلل الأسانيد <span style="font-weight:normal;font-size:14px">v0.2.1 — نموذج بحثي</span></h1>
+  <p>يعرض تراجم رجال الإسناد وأقوال الجرح والتعديل بمصادرها — ولا يصدر حكمًا على الحديث</p>
+</header>
+<main>
+  <div class="controls">
+    <select id="book">
+      <option value="bukhari">صحيح البخاري</option>
+      <option value="muslim">صحيح مسلم</option>
+      <option value="abudawud">سنن أبي داود</option>
+      <option value="tirmidhi">جامع الترمذي</option>
+      <option value="nasai">سنن النسائي</option>
+      <option value="ibnmajah">سنن ابن ماجه</option>
+    </select>
+    <input id="q" placeholder="ابحث بنص الحديث أو رقم الحديث… مثال: إنما الأعمال">
+    <button id="go" class="primary">بحث</button>
+  </div>
+  <div id="status">جارِ تحميل قواعد البيانات…</div>
+  <div id="back"><button onclick="showResults()">← الرجوع إلى النتائج</button></div>
+  <div id="results"></div>
+  <div id="analysis"></div>
+</main>
+<footer>
+  أداة بحثية لطلبة العلم — التحليل آلي وقد يخطئ في تعيين الرواة؛ راجع التنبيهات دائمًا.<br>
+  البيانات: hatemben/hadithdb (تراجم وجرح وتعديل) · LK Hadith Corpus (نصوص الكتب الستة) · muslimscholars.info (سجل الرواة)
+</footer>
+<script src="analysis.js"></script>
+<script>
+let matcher = null, corpus = {}, lastResults = [];
+const $ = id => document.getElementById(id);
+const esc = s => (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function loadJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(url); return r.json(); }
+
+async function init() {
+  try {
+    const [dict, profiles, kaggle] = await Promise.all([
+      loadJSON("data/mention_dict.json"),
+      loadJSON("data/narrators.json"),
+      loadJSON("data/kaggle_narrators.json"),
+    ]);
+    matcher = new IsnadCore.Matcher(dict, profiles, kaggle);
+    $("status").textContent = "جاهز. اختر كتابًا واكتب كلمة من الحديث أو رقمه.";
+    $("go").disabled = false;
+  } catch (e) { $("status").textContent = "تعذر تحميل البيانات: " + e.message; }
+}
+
+async function getBook(b) {
+  if (!corpus[b]) {
+    $("status").textContent = "جارِ تحميل " + $("book").selectedOptions[0].text + "…";
+    corpus[b] = await loadJSON("data/books/" + b + ".json");
+  }
+  return corpus[b];
+}
+
+async function search() {
+  const b = $("book").value, q = $("q").value.trim();
+  if (!q) return;
+  const hs = await getBook(b);
+  let hits;
+  if (/^\d+$/.test(q)) hits = hs.filter(h => h.num === q);
+  else { const nq = IsnadCore.norm(q); hits = hs.filter(h => IsnadCore.norm(h.isnad + " " + h.matn).includes(nq)); }
+  lastResults = hits.slice(0, 50);
+  $("status").textContent = hits.length ? `${hits.length} نتيجة (تُعرض ${lastResults.length})` : "لا نتائج.";
+  showResults();
+}
+
+function showResults() {
+  $("analysis").innerHTML = ""; $("back").style.display = "none";
+  $("results").innerHTML = lastResults.map((h, i) =>
+    `<div class="hit" onclick="analyze(${i})">
+      <div class="meta">${esc($("book").selectedOptions[0].text)} — حديث ${esc(h.num)} ${h.grade ? "· الحكم في المصدر: " + esc(h.grade) : ""}</div>
+      <div>${esc(h.isnad.slice(0, 140))}…</div>
+      <div style="color:#555;font-size:14px;margin-top:4px">${esc((h.matn || "").slice(0, 160))}</div>
+    </div>`).join("");
+}
+
+function profileCard(it) {
+  const p = it.profile, d = p.data || {};
+  const name = ((d["الاسم"] || p.name) + "").replace(/^:\s*/, "").split("(")[0].trim();
+  let kvs = "";
+  for (const k of ["الكنية","اللقب","النسب","بلد الإقامة","طبقة رواة التقريب","تاريخ الوفاة"])
+    if (d[k]) kvs += `<div class="kv"><b>${k}:</b> ${esc((d[k]+"").replace(/^:\s*/,""))}</div>`;
+  if (it.companion)
+    return baseCard(it, name, kvs + `<div class="kv"><span class="badge">صحابي — لا يُسأل عن عدالته [R0]</span></div>`);
+  let ranks = "";
+  for (const k of ["الرتبة عند ابن حجر","الرتبة عند الذهبي"])
+    if (d[k]) ranks += `<div class="kv"><b>${k}:</b> ${esc(d[k])}</div>`;
+  const jt = d["الجرح والتعديل"] || {};
+  let quotes = "";
+  for (const [critic, qs] of Object.entries(jt))
+    quotes += qs.slice(0, 2).map(q => {
+      const src = (q.match(/\[([^\]]+)\]\s*$/) || [])[1] || "";
+      return `<div class="quote"><b>${esc(critic)}:</b> ${esc(q.replace(/\[[^\]]+\]\s*$/, ""))} <span class="src">[${esc(src)}]</span></div>`;
+    }).join("");
+  const nCritics = Object.keys(jt).length;
+  const details = nCritics ? `<details><summary>أقوال الجرح والتعديل (${nCritics} ناقدًا)</summary>${quotes}</details>` : "";
+  return baseCard(it, name, kvs + ranks + details);
+}
+
+function baseCard(it, title, body, warn) {
+  const s = it.sigha;
+  const badge = s.status === "check" ? `<span class="badge warn">${it.verb} — ${s.label} ⚠️</span>`
+              : s.status === "ok" ? `<span class="badge">${it.verb} — ${s.label}</span>`
+              : `<span class="badge grey">${esc(it.verb)}</span>`;
+  return `<div class="card rawi ${warn ? "warn" : ""}"><h3>${it.idx}. ${esc(title)} ${badge}</h3>${body}</div>`;
+}
+
+function analyze(i) {
+  const h = lastResults[i];
+  const { items, flags } = IsnadCore.analyzeChain(h.isnad, matcher);
+  let html = `<div class="card"><div class="meta" style="color:#777;font-size:13px">${esc($("book").selectedOptions[0].text)} — حديث ${esc(h.num)} · ${esc(h.chapter||"")} ${h.grade ? "· <b>الحكم المثبت في المصدر (للمقارنة):</b> " + esc(h.grade) : ""}</div>
+    <div class="isnadtext"><b>الإسناد:</b> ${esc(h.isnad)}</div>
+    <div style="margin-top:8px;line-height:1.9">${esc((h.matn||"").slice(0,500))}</div></div>
+    <h2 style="color:var(--accent)">رجال الإسناد (${items.length})</h2>`;
+  for (const it of items) {
+    if (it.profile) html += profileCard(it);
+    else if (it.registry) {
+      const v = it.registry;
+      html += baseCard(it, it.mention,
+        `<div class="kv"><b>الاسم:</b> ${esc(v.name_ar)}</div>
+         <div class="kv"><b>الجيل:</b> ${esc(v.generation)}</div>
+         ${v.death_hijri ? `<div class="kv"><b>الوفاة:</b> ${esc(v.death_hijri)} هـ</div>` : ""}
+         ${v.places ? `<div class="kv"><b>الأماكن:</b> ${esc(v.places)}</div>` : ""}
+         <div class="kv"><span class="badge grey">تعريف من سجل الرواة — لا أقوال جرح وتعديل بعد</span></div>`, true);
+    } else if (it.match.candidates.length) {
+      const cands = it.match.candidates.map(c => {
+        if (c.src === "db" || matcher.profiles[c.id]) {
+          const p = matcher.profiles[c.id]; if (!p) return "";
+          const nm = (((p.data||{})["الاسم"]) || p.name).replace(/^:\s*/,"").split("(")[0].trim();
+          return `<div class="cand">• ${esc(nm)} — ${esc((p.data||{})["الرتبة عند ابن حجر"] || "؟")}</div>`;
+        }
+        const v = matcher.kaggle[c.id]; return v ? `<div class="cand">• ${esc(v.name_ar)} — ${esc(v.generation)} (سجل)</div>` : "";
+      }).join("");
+      html += baseCard(it, it.mention, `<div class="kv"><span class="badge warn">مطابقة غير حاسمة — مرشحون [R9]</span></div>${cands}`, true);
+    } else {
+      html += baseCard(it, it.mention, `<div class="kv"><span class="badge grey">لا ترجمة في قواعد البيانات الحالية</span></div>`, true);
+    }
+  }
+  html += `<h2 style="color:var(--accent)">تنبيهات</h2><div class="card"><ul class="flags">` +
+    (flags.length ? flags.map(f => `<li><b>${esc(f.who)}:</b> ${esc(f.msg)}</li>`).join("") : "<li>لا تنبيهات.</li>") +
+    `</ul></div>
+    <div class="card" style="font-size:13px;color:#666">تقرير آلي — أداة بحثية تعرض أقوال النقاد المتقدمين بمصادرها، وليست حكمًا مستقلًّا على الحديث.</div>`;
+  $("results").innerHTML = ""; $("analysis").innerHTML = html;
+  $("back").style.display = "block"; window.scrollTo(0, 0);
+}
+
+$("go").disabled = true;
+$("go").onclick = search;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+init();
+</script>
+</body>
+</html>
